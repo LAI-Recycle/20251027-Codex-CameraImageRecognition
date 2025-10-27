@@ -9,6 +9,7 @@ const modelsStatus = document.getElementById("models-status");
 const labelInput = document.getElementById("label-input");
 const imagesInput = document.getElementById("images-input");
 const addKnownBtn = document.getElementById("add-known-btn");
+const captureKnownBtn = document.getElementById("capture-known-btn");
 const knownList = document.getElementById("known-list");
 const startCameraBtn = document.getElementById("start-camera-btn");
 const stopCameraBtn = document.getElementById("stop-camera-btn");
@@ -107,15 +108,12 @@ async function addKnownFace() {
     return;
   }
 
-  labeledDescriptors.push(new faceapi.LabeledFaceDescriptors(label, descriptors));
-  faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.45);
-  updateKnownList();
-
+  const { added, total, isNew } = registerDescriptors(label, descriptors);
   labelInput.value = "";
   imagesInput.value = "";
   setStatus(
     modelsStatus,
-    `已新增 ${label}（${descriptors.length} 組特徵向量）`,
+    `${isNew ? "已建立" : "已更新"} ${label}（新增 ${added} 組，總計 ${total} 組）`,
     "ready"
   );
   addKnownBtn.disabled = false;
@@ -125,9 +123,77 @@ function updateKnownList() {
   knownList.innerHTML = "";
   labeledDescriptors.forEach((entry) => {
     const item = document.createElement("li");
-    item.textContent = `${entry.label} (${entry.descriptors.length})`;
+    item.textContent = `${entry.label}（${entry.descriptors.length}）`;
     knownList.appendChild(item);
   });
+}
+
+function registerDescriptors(label, descriptors) {
+  if (!Array.isArray(descriptors) || descriptors.length === 0) {
+    return { added: 0, total: 0, isNew: false };
+  }
+
+  let entry = labeledDescriptors.find((item) => item.label === label);
+  const added = descriptors.length;
+  let isNew = false;
+
+  if (entry) {
+    entry.descriptors.push(...descriptors);
+  } else {
+    entry = new faceapi.LabeledFaceDescriptors(label, descriptors);
+    labeledDescriptors.push(entry);
+    isNew = true;
+  }
+
+  faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.45);
+  updateKnownList();
+
+  return { added, total: entry.descriptors.length, isNew };
+}
+
+async function captureKnownFace() {
+  if (!modelsLoaded) {
+    setStatus(modelsStatus, "請先載入模型", "warn");
+    return;
+  }
+
+  const label = labelInput.value.trim();
+  if (!label) {
+    alert("請先輸入標籤名稱。");
+    return;
+  }
+
+  if (!mediaStream || video.readyState < 2) {
+    setStatus(cameraStatus, "請先啟動攝影機並對準臉部", "warn");
+    return;
+  }
+
+  captureKnownBtn.disabled = true;
+  setStatus(modelsStatus, "正在從攝影機擷取人臉...");
+
+  try {
+    const detection = await faceapi
+      .detectSingleFace(video, TINY_FACE_DETECTOR_OPTIONS)
+      .withFaceLandmarks()
+      .withFaceDescriptor();
+
+    if (!detection) {
+      setStatus(modelsStatus, "未偵測到人臉，請調整角度後重試", "warn");
+      return;
+    }
+
+    const { added, total, isNew } = registerDescriptors(label, [detection.descriptor]);
+    setStatus(
+      modelsStatus,
+      `${isNew ? "已建立" : "已更新"} ${label}（攝影機新增 ${added} 組，總計 ${total} 組）`,
+      "ready"
+    );
+  } catch (error) {
+    console.error("擷取人臉失敗：", error);
+    setStatus(modelsStatus, "擷取失敗，請再次嘗試", "warn");
+  } finally {
+    captureKnownBtn.disabled = false;
+  }
 }
 
 async function startCamera() {
@@ -234,6 +300,7 @@ async function runDetectionLoop() {
 
 loadModelsBtn.addEventListener("click", loadModels);
 addKnownBtn.addEventListener("click", addKnownFace);
+captureKnownBtn.addEventListener("click", captureKnownFace);
 startCameraBtn.addEventListener("click", startCamera);
 stopCameraBtn.addEventListener("click", stopCamera);
 

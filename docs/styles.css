@@ -105,6 +105,22 @@ button.primary {
   color: white;
 }
 
+.known-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+@media (min-width: 640px) {
+  .known-actions {
+    flex-direction: row;
+  }
+
+  .known-actions button {
+    flex: 1;
+  }
+}
+
 button:hover {
   opacity: 0.9;
 }
