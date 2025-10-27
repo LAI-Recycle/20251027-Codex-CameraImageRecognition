@@ -22,7 +22,8 @@ let modelsLoaded = false;
 let labeledDescriptors = [];
 let faceMatcher = null;
 let detectionActive = false;
-let detectionHandle = null;
+let detectionIntervalId = null;
+let processingFrame = false;
 let mediaStream = null;
 
 function setStatus(element, message, type = null) {
@@ -220,9 +221,9 @@ async function startCamera() {
 
 function stopCamera() {
   detectionActive = false;
-  if (detectionHandle) {
-    cancelAnimationFrame(detectionHandle);
-    detectionHandle = null;
+  if (detectionIntervalId) {
+    clearInterval(detectionIntervalId);
+    detectionIntervalId = null;
   }
   overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
 
@@ -236,66 +237,79 @@ function stopCamera() {
   setStatus(cameraStatus, "攝影機已停止");
 }
 
-async function runDetectionLoop() {
-  const drawFrame = async () => {
-    if (!detectionActive) {
-      return;
-    }
+function runDetectionLoop() {
+  if (detectionIntervalId) {
+    return;
+  }
 
-    const { videoWidth, videoHeight } = video;
-    if (videoWidth === 0 || videoHeight === 0) {
-      detectionHandle = requestAnimationFrame(drawFrame);
-      return;
-    }
+  const intervalMs = 120;
+  detectionIntervalId = setInterval(processFrame, intervalMs);
+  processFrame();
+}
 
-    if (overlay.width !== videoWidth || overlay.height !== videoHeight) {
-      overlay.width = videoWidth;
-      overlay.height = videoHeight;
-    }
+async function processFrame() {
+  if (!detectionActive || processingFrame) {
+    return;
+  }
+
+  const { videoWidth, videoHeight } = video;
+  if (!videoWidth || !videoHeight) {
+    return;
+  }
+
+  if (overlay.width !== videoWidth || overlay.height !== videoHeight) {
+    overlay.width = videoWidth;
+    overlay.height = videoHeight;
+  }
+
+  processingFrame = true;
+
+  try {
+    const detections = await faceapi
+      .detectAllFaces(video, TINY_FACE_DETECTOR_OPTIONS)
+      .withFaceLandmarks()
+      .withFaceDescriptors();
 
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
 
-    try {
-      const detections = await faceapi
-        .detectAllFaces(video, TINY_FACE_DETECTOR_OPTIONS)
-        .withFaceLandmarks()
-        .withFaceDescriptors();
-
-      const resizedDetections = faceapi.resizeResults(detections, {
-        width: overlay.width,
-        height: overlay.height,
-      });
-
-      resizedDetections.forEach((detection) => {
-        const box = detection.detection.box;
-        overlayCtx.strokeStyle = "#0f62fe";
-        overlayCtx.lineWidth = 2;
-        overlayCtx.strokeRect(box.x, box.y, box.width, box.height);
-
-        let label = "未知";
-        if (faceMatcher) {
-          const match = faceMatcher.findBestMatch(detection.descriptor);
-          label =
-            match.label === "unknown"
-              ? "未知"
-              : `${match.label}（${match.distance.toFixed(2)}）`;
-        }
-
-        overlayCtx.fillStyle = "rgba(15, 98, 254, 0.85)";
-        overlayCtx.fillRect(box.x, box.y - 24, box.width, 24);
-
-        overlayCtx.fillStyle = "#ffffff";
-        overlayCtx.font = "16px Segoe UI, sans-serif";
-        overlayCtx.fillText(label, box.x + 6, box.y - 6);
-      });
-    } catch (error) {
-      console.error("偵測錯誤：", error);
+    if (detections.length === 0) {
+      return;
     }
 
-    detectionHandle = requestAnimationFrame(drawFrame);
-  };
+    const resizedDetections = faceapi.resizeResults(detections, {
+      width: overlay.width,
+      height: overlay.height,
+    });
 
-  detectionHandle = requestAnimationFrame(drawFrame);
+    resizedDetections.forEach((detection) => {
+      const box = detection.detection.box;
+      overlayCtx.strokeStyle = "#00b894";
+      overlayCtx.lineWidth = 3;
+      overlayCtx.strokeRect(box.x, box.y, box.width, box.height);
+
+      let label = "未知";
+      if (faceMatcher) {
+        const match = faceMatcher.findBestMatch(detection.descriptor);
+        label =
+          match.label === "unknown"
+            ? "未知"
+            : `${match.label}（${match.distance.toFixed(2)}）`;
+      }
+
+      const labelHeight = 26;
+      overlayCtx.fillStyle = "rgba(0, 0, 0, 0.65)";
+      const labelY = Math.max(box.y - labelHeight, 0);
+      overlayCtx.fillRect(box.x, labelY, box.width, labelHeight);
+
+      overlayCtx.fillStyle = "#ffffff";
+      overlayCtx.font = "16px Segoe UI, sans-serif";
+      overlayCtx.fillText(label, box.x + 6, labelY + 18);
+    });
+  } catch (error) {
+    console.error("偵測錯誤：", error);
+  } finally {
+    processingFrame = false;
+  }
 }
 
 loadModelsBtn.addEventListener("click", loadModels);
