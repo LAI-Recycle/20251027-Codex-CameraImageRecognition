@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>網頁版臉部辨識</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.min.js"></script>
+    <script defer src="app.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>網頁版臉部辨識</h1>
+      <p>載入標記過的照片並啟動攝影機，系統會即時進行臉部辨識。</p>
+    </header>
+
+    <main>
+      <section class="controls">
+        <div class="loader">
+          <button id="load-models-btn" class="primary">載入模型</button>
+          <span id="models-status" class="status">模型尚未載入</span>
+        </div>
+
+        <div class="known-face-form">
+          <label>
+            標籤名稱
+            <input id="label-input" type="text" placeholder="例如：Alice" />
+          </label>
+          <label class="file-input">
+            圖片
+            <input id="images-input" type="file" accept="image/*" multiple />
+          </label>
+          <button id="add-known-btn">新增已知人臉</button>
+        </div>
+
+        <div class="known-list">
+          <h2>已知人物列表</h2>
+          <ul id="known-list"></ul>
+        </div>
+
+        <div class="camera-controls">
+          <button id="start-camera-btn" class="primary">啟動攝影機</button>
+          <button id="stop-camera-btn">停止攝影機</button>
+          <span id="camera-status" class="status">攝影機未啟動</span>
+        </div>
+      </section>
+
+      <section class="preview">
+        <div class="video-wrapper">
+          <video id="video" width="640" height="480" autoplay muted playsinline></video>
+          <canvas id="overlay" width="640" height="480"></canvas>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        透過 <code>face-api.js</code> 全程在瀏覽器端執行，影像資料不會離開你的裝置。
+      </p>
+    </footer>
+  </body>
+</html>
