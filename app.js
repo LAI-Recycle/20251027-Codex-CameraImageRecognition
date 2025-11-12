@@ -18,6 +18,15 @@ const video = document.getElementById("video");
 const overlay = document.getElementById("overlay");
 const overlayCtx = overlay.getContext("2d");
 
+const FACE_STORE_CONFIG = window.__FACE_STORE_CONFIG__ || {};
+const FUNCTIONS_BASE_URL = (FACE_STORE_CONFIG.functionsBaseUrl || "").replace(/\/$/, "");
+const FUNCTION_PATHS = {
+  list: FACE_STORE_CONFIG.listPath || "/faces-list",
+  register: FACE_STORE_CONFIG.registerPath || "/faces-register",
+};
+const SHOULD_USE_REMOTE_STORE = Boolean(FUNCTIONS_BASE_URL);
+const LOCAL_STORAGE_KEY = "face-recognition-known-faces";
+
 let modelsLoaded = false;
 let labeledDescriptors = [];
 let faceMatcher = null;
@@ -25,6 +34,7 @@ let detectionActive = false;
 let detectionIntervalId = null;
 let processingFrame = false;
 let mediaStream = null;
+let remoteSyncCompleted = false;
 
 function setStatus(element, message, type = null) {
   element.textContent = message;
@@ -36,9 +46,211 @@ function setStatus(element, message, type = null) {
   }
 }
 
+function buildFunctionUrl(pathKey) {
+  if (!SHOULD_USE_REMOTE_STORE) {
+    return null;
+  }
+  const path = FUNCTION_PATHS[pathKey];
+  if (!path) {
+    return null;
+  }
+  const normalisedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${FUNCTIONS_BASE_URL}${normalisedPath}`;
+}
+
+function persistLocalDescriptors() {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+
+  try {
+    const payload = labeledDescriptors.map((entry) => ({
+      label: entry.label,
+      descriptors: entry.descriptors.map((descriptor) => Array.from(descriptor)),
+    }));
+    window.localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("儲存本機快取失敗", error);
+  }
+}
+
+function restoreKnownFacesFromLocal() {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return false;
+  }
+
+  let raw;
+  try {
+    raw = window.localStorage.getItem(LOCAL_STORAGE_KEY);
+  } catch (error) {
+    console.warn("讀取本機快取失敗", error);
+    return false;
+  }
+
+  if (!raw) {
+    return false;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch (error) {
+    console.warn("解析本機快取失敗", error);
+    return false;
+  }
+
+  if (!Array.isArray(payload)) {
+    return false;
+  }
+
+  const nextDescriptors = [];
+  payload.forEach((item) => {
+    if (!item || typeof item.label !== "string" || !Array.isArray(item.descriptors)) {
+      return;
+    }
+    const descriptors = item.descriptors
+      .filter((descriptor) => Array.isArray(descriptor) && descriptor.length > 0)
+      .map((descriptor) => new Float32Array(descriptor));
+    if (descriptors.length > 0) {
+      nextDescriptors.push(new faceapi.LabeledFaceDescriptors(item.label, descriptors));
+    }
+  });
+
+  if (nextDescriptors.length === 0) {
+    return false;
+  }
+
+  labeledDescriptors = nextDescriptors;
+  rebuildMatcher();
+  return true;
+}
+
+function rebuildMatcher() {
+  faceMatcher = labeledDescriptors.length
+    ? new faceapi.FaceMatcher(labeledDescriptors, 0.45)
+    : null;
+  updateKnownList();
+  persistLocalDescriptors();
+}
+
+restoreKnownFacesFromLocal();
+
+async function syncKnownFacesFromRemote(force = false, options = {}) {
+  if (!SHOULD_USE_REMOTE_STORE) {
+    return;
+  }
+
+  const { silent = false } = options || {};
+
+  if (remoteSyncCompleted && !force) {
+    return;
+  }
+
+  const endpoint = buildFunctionUrl("list");
+  if (!endpoint) {
+    return;
+  }
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const faces = Array.isArray(payload?.faces) ? payload.faces : [];
+
+    if (faces.length === 0) {
+      labeledDescriptors = [];
+      rebuildMatcher();
+      remoteSyncCompleted = true;
+      if (!silent) {
+        setStatus(modelsStatus, "遠端未找到已知人像", "warn");
+      }
+      return;
+    }
+
+    const grouped = new Map();
+    faces.forEach((item) => {
+      if (!item || typeof item.label !== "string" || !Array.isArray(item.embedding)) {
+        return;
+      }
+      const descriptor = new Float32Array(item.embedding);
+      if (!grouped.has(item.label)) {
+        grouped.set(item.label, []);
+      }
+      grouped.get(item.label).push(descriptor);
+    });
+
+    const nextDescriptors = [];
+    grouped.forEach((descriptors, label) => {
+      if (descriptors.length > 0) {
+        nextDescriptors.push(new faceapi.LabeledFaceDescriptors(label, descriptors));
+      }
+    });
+
+    labeledDescriptors = nextDescriptors;
+    rebuildMatcher();
+    remoteSyncCompleted = true;
+    if (!silent) {
+      setStatus(modelsStatus, "已同步遠端資料", "ready");
+    }
+  } catch (error) {
+    console.error("同步遠端人像資料失敗", error);
+    if (!silent) {
+      setStatus(modelsStatus, "同步遠端資料失敗，改用本機快取", "warn");
+    }
+  }
+}
+
+async function persistKnownFaces(label, descriptors) {
+  if (!SHOULD_USE_REMOTE_STORE) {
+    return;
+  }
+  if (!label || !Array.isArray(descriptors) || descriptors.length === 0) {
+    return;
+  }
+
+  const endpoint = buildFunctionUrl("register");
+  if (!endpoint) {
+    return;
+  }
+
+  try {
+    const body = JSON.stringify({
+      label,
+      descriptors: descriptors.map((descriptor) =>
+        Array.from(descriptor instanceof Float32Array ? descriptor : new Float32Array(descriptor))
+      ),
+    });
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body,
+    });
+
+    if (!response.ok) {
+      const details = await response.text();
+      throw new Error(`HTTP ${response.status}: ${details}`);
+    }
+  } catch (error) {
+    console.error("儲存人像資料到遠端時失敗", error);
+    setStatus(modelsStatus, "遠端儲存失敗，資料僅保留在本機快取", "warn");
+  }
+}
+
 async function loadModels() {
   if (modelsLoaded) {
     setStatus(modelsStatus, "模型已載入", "ready");
+    await syncKnownFacesFromRemote(false, { silent: true });
     return;
   }
 
@@ -53,9 +265,11 @@ async function loadModels() {
     ]);
     modelsLoaded = true;
     setStatus(modelsStatus, "模型載入完成", "ready");
+    await syncKnownFacesFromRemote(true);
   } catch (error) {
     console.error(error);
     setStatus(modelsStatus, "模型載入失敗", "warn");
+  } finally {
     loadModelsBtn.disabled = false;
   }
 }
@@ -70,11 +284,11 @@ async function addKnownFace() {
   const files = Array.from(imagesInput.files || []);
 
   if (!label) {
-    alert("請先輸入標籤名稱。");
+    alert("請先輸入標籤名稱");
     return;
   }
   if (files.length === 0) {
-    alert("請至少選擇一張照片。");
+    alert("請至少選擇一張照片");
     return;
   }
 
@@ -98,13 +312,13 @@ async function addKnownFace() {
 
       descriptors.push(detection.descriptor);
     } catch (error) {
-      console.warn(`處理 ${file.name} 失敗`, error);
+      console.warn(`處理 ${file.name} 時發生錯誤`, error);
     }
   }
 
   if (descriptors.length === 0) {
-    alert("選取的照片中未偵測到可用的人臉。");
-    setStatus(modelsStatus, "未新增任何人臉", "warn");
+    alert("所選照片中沒有偵測到可用的人臉");
+    setStatus(modelsStatus, "未新增任何人像", "warn");
     addKnownBtn.disabled = false;
     return;
   }
@@ -114,9 +328,11 @@ async function addKnownFace() {
   imagesInput.value = "";
   setStatus(
     modelsStatus,
-    `${isNew ? "已建立" : "已更新"} ${label}（新增 ${added} 組，總計 ${total} 組）`,
+    `${isNew ? "已建立" : "已更新"} ${label}（新增 ${added} 組，累計 ${total} 組）`,
     "ready"
   );
+  await persistKnownFaces(label, descriptors);
+  await syncKnownFacesFromRemote(true, { silent: true });
   addKnownBtn.disabled = false;
 }
 
@@ -146,8 +362,7 @@ function registerDescriptors(label, descriptors) {
     isNew = true;
   }
 
-  faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.45);
-  updateKnownList();
+  rebuildMatcher();
 
   return { added, total: entry.descriptors.length, isNew };
 }
@@ -160,17 +375,17 @@ async function captureKnownFace() {
 
   const label = labelInput.value.trim();
   if (!label) {
-    alert("請先輸入標籤名稱。");
+    alert("請先輸入標籤名稱");
     return;
   }
 
   if (!mediaStream || video.readyState < 2) {
-    setStatus(cameraStatus, "請先啟動攝影機並對準臉部", "warn");
+    setStatus(cameraStatus, "請先啟動攝影機並確認對準臉部", "warn");
     return;
   }
 
   captureKnownBtn.disabled = true;
-  setStatus(modelsStatus, "正在從攝影機擷取人臉...");
+  setStatus(modelsStatus, "正在從攝影機擷取人像...");
 
   try {
     const detection = await faceapi
@@ -179,19 +394,21 @@ async function captureKnownFace() {
       .withFaceDescriptor();
 
     if (!detection) {
-      setStatus(modelsStatus, "未偵測到人臉，請調整角度後重試", "warn");
+      setStatus(modelsStatus, "未偵測到人臉，請調整角度後再試", "warn");
       return;
     }
 
     const { added, total, isNew } = registerDescriptors(label, [detection.descriptor]);
     setStatus(
       modelsStatus,
-      `${isNew ? "已建立" : "已更新"} ${label}（攝影機新增 ${added} 組，總計 ${total} 組）`,
+      `${isNew ? "已建立" : "已更新"} ${label}（攝影機新增 ${added} 組，累計 ${total} 組）`,
       "ready"
     );
+    await persistKnownFaces(label, [detection.descriptor]);
+    await syncKnownFacesFromRemote(true, { silent: true });
   } catch (error) {
-    console.error("擷取人臉失敗：", error);
-    setStatus(modelsStatus, "擷取失敗，請再次嘗試", "warn");
+    console.error("擷取人像失敗", error);
+    setStatus(modelsStatus, "擷取失敗，請稍後再試", "warn");
   } finally {
     captureKnownBtn.disabled = false;
   }
@@ -287,13 +504,11 @@ async function processFrame() {
       overlayCtx.lineWidth = 3;
       overlayCtx.strokeRect(box.x, box.y, box.width, box.height);
 
-      let label = "未知";
+      let displayLabel = "未知";
       if (faceMatcher) {
         const match = faceMatcher.findBestMatch(detection.descriptor);
-        label =
-          match.label === "unknown"
-            ? "未知"
-            : `${match.label}（${match.distance.toFixed(2)}）`;
+        displayLabel =
+          match.label === "unknown" ? "未知" : `${match.label}（${match.distance.toFixed(2)}）`;
       }
 
       const labelHeight = 26;
@@ -303,19 +518,34 @@ async function processFrame() {
 
       overlayCtx.fillStyle = "#ffffff";
       overlayCtx.font = "16px Segoe UI, sans-serif";
-      overlayCtx.fillText(label, box.x + 6, labelY + 18);
+      overlayCtx.fillText(displayLabel, box.x + 6, labelY + 18);
     });
   } catch (error) {
-    console.error("偵測錯誤：", error);
+    console.error("偵測畫面時發生錯誤", error);
   } finally {
     processingFrame = false;
   }
 }
 
-loadModelsBtn.addEventListener("click", loadModels);
-addKnownBtn.addEventListener("click", addKnownFace);
-captureKnownBtn.addEventListener("click", captureKnownFace);
-startCameraBtn.addEventListener("click", startCamera);
+loadModelsBtn.addEventListener("click", () => {
+  loadModels().catch((error) => console.error("載入模型時發生錯誤", error));
+});
+addKnownBtn.addEventListener("click", () => {
+  addKnownFace().catch((error) => console.error("新增人像時發生錯誤", error));
+});
+captureKnownBtn.addEventListener("click", () => {
+  captureKnownFace().catch((error) => console.error("擷取人像時發生錯誤", error));
+});
+startCameraBtn.addEventListener("click", () => {
+  startCamera().catch((error) => console.error("啟動攝影機時發生錯誤", error));
+});
 stopCameraBtn.addEventListener("click", stopCamera);
 
+window.addEventListener("DOMContentLoaded", () => {
+  if (SHOULD_USE_REMOTE_STORE) {
+    syncKnownFacesFromRemote(false, { silent: true }).catch((error) =>
+      console.warn("預載遠端資料失敗", error)
+    );
+  }
+});
 window.addEventListener("beforeunload", stopCamera);
