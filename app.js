@@ -13,6 +13,7 @@ const captureKnownBtn = document.getElementById("capture-known-btn");
 const knownList = document.getElementById("known-list");
 const startCameraBtn = document.getElementById("start-camera-btn");
 const stopCameraBtn = document.getElementById("stop-camera-btn");
+const clearCacheBtn = document.getElementById("clear-cache-btn");
 const cameraStatus = document.getElementById("camera-status");
 const video = document.getElementById("video");
 const overlay = document.getElementById("overlay");
@@ -63,6 +64,11 @@ function persistLocalDescriptors() {
     return;
   }
 
+  if (labeledDescriptors.length === 0) {
+    removeLocalCacheEntry();
+    return;
+  }
+
   try {
     const payload = labeledDescriptors.map((entry) => ({
       label: entry.label,
@@ -71,6 +77,19 @@ function persistLocalDescriptors() {
     window.localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(payload));
   } catch (error) {
     console.warn("儲存本機快取失敗", error);
+  }
+}
+
+function removeLocalCacheEntry() {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return false;
+  }
+  try {
+    window.localStorage.removeItem(LOCAL_STORAGE_KEY);
+    return true;
+  } catch (error) {
+    console.warn("刪除本機快取失敗", error);
+    return false;
   }
 }
 
@@ -123,6 +142,47 @@ function restoreKnownFacesFromLocal() {
   labeledDescriptors = nextDescriptors;
   rebuildMatcher();
   return true;
+}
+
+function removeLabelFromCache(label) {
+  if (!label) {
+    return;
+  }
+
+  const nextDescriptors = labeledDescriptors.filter((entry) => entry.label !== label);
+  if (nextDescriptors.length === labeledDescriptors.length) {
+    return;
+  }
+
+  labeledDescriptors = nextDescriptors;
+  remoteSyncCompleted = false;
+  rebuildMatcher();
+
+  const message = SHOULD_USE_REMOTE_STORE
+    ? `已刪除 ${label} 的本機快取，下次同步會重新載入遠端資料`
+    : `已刪除 ${label} 的本機快取`;
+  setStatus(modelsStatus, message, "ready");
+}
+
+function handleClearCacheClick() {
+  const confirmed = window.confirm("確定要刪除本機快取嗎？此動作無法復原。");
+  if (!confirmed) {
+    return;
+  }
+
+  labeledDescriptors = [];
+  remoteSyncCompleted = false;
+  rebuildMatcher();
+
+  const removed = removeLocalCacheEntry();
+  if (removed) {
+    const message = SHOULD_USE_REMOTE_STORE
+      ? "已清除本機快取，若要恢復資料請重新同步遠端紀錄"
+      : "已清除本機快取，目前沒有任何已知人像";
+    setStatus(modelsStatus, message, "ready");
+  } else {
+    setStatus(modelsStatus, "刪除本機快取失敗，請稍後再試", "warn");
+  }
 }
 
 function rebuildMatcher() {
@@ -340,7 +400,23 @@ function updateKnownList() {
   knownList.innerHTML = "";
   labeledDescriptors.forEach((entry) => {
     const item = document.createElement("li");
-    item.textContent = `${entry.label}（${entry.descriptors.length}）`;
+    const labelSpan = document.createElement("span");
+    labelSpan.className = "known-label";
+    labelSpan.textContent = `${entry.label}（${entry.descriptors.length}）`;
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "delete-cache-btn";
+    deleteBtn.textContent = "刪除";
+    deleteBtn.addEventListener("click", () => {
+      const confirmed = window.confirm(`確定要刪除 ${entry.label} 的本機快取嗎？`);
+      if (confirmed) {
+        removeLabelFromCache(entry.label);
+      }
+    });
+
+    item.appendChild(labelSpan);
+    item.appendChild(deleteBtn);
     knownList.appendChild(item);
   });
 }
@@ -540,6 +616,9 @@ startCameraBtn.addEventListener("click", () => {
   startCamera().catch((error) => console.error("啟動攝影機時發生錯誤", error));
 });
 stopCameraBtn.addEventListener("click", stopCamera);
+if (clearCacheBtn) {
+  clearCacheBtn.addEventListener("click", handleClearCacheClick);
+}
 
 window.addEventListener("DOMContentLoaded", () => {
   if (SHOULD_USE_REMOTE_STORE) {

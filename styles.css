@@ -58,6 +58,7 @@ main {
 
 .loader,
 .known-face-form,
+.cache-controls,
 .camera-controls {
   display: flex;
   flex-direction: column;
@@ -135,6 +136,12 @@ button:disabled {
   color: var(--muted);
 }
 
+.cache-note {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
 .status.ready {
   color: var(--success);
 }
@@ -164,10 +171,26 @@ button:disabled {
 
 #known-list li {
   padding: 0.6rem 0.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #f0f6ff;
   font-weight: 600;
+}
+
+.known-label {
+  flex: 1;
+}
+
+.delete-cache-btn {
+  border-color: var(--warning);
+  color: var(--warning);
+  background: white;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.9rem;
 }
 
 .video-wrapper {
