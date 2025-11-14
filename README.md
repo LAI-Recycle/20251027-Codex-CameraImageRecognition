@@ -1,83 +1,123 @@
-相機臉部辨識
-============
+# 人臉辨識示範專案
 
-此專案提供兩種臉部辨識方式：
+這個專案包含兩個部分：
 
-- 本機 Python 應用程式（`camera_recognition.py`），搭配 `face_recognition` 及 OpenCV 透過電腦攝影機偵測與辨識。
-- 靜態網頁（`docs/`），採用 `face-api.js`，可部署到 GitHub Pages，所有運算皆在瀏覽器端完成。
+- `index.html`、`app.js`、`styles.css`：瀏覽器端的人臉辨識介面，使用 `face-api.js` 於前端計算臉部特徵，並可將結果同步到 Supabase。
+- `camera_recognition.py`：原始的 Python 範例 (OpenCV + face_recognition)，可在本機測試或擴充。
 
-方案一：本機 Python 應用
-------------------------
+> 建議前端與 Supabase Edge Functions 搭配使用，以保持 GitHub Pages 的純靜態部署，同時安全儲存人臉向量資料。
 
-### 系統需求
-- Python 3.9-3.11（建議 64 位元）
-- 能在其他 Windows 應用程式正常運作的攝影機
-- Visual C++ 14 Build Tools（若安裝輪子失敗才需要）
+---
 
-### 建置步驟
-1. 建議建立虛擬環境：
-   ```
+## 1. 瀏覽器端使用方式
+
+1. 以 `index.html` 為入口，在支援 HTTPS 的環境 (GitHub Pages 或本機 HTTPS server) 開啟。
+2. 點擊「載入模型」，待模型載入完成後才能進行人臉偵測。
+3. 有兩種方式建立已知人像：
+   - 上傳照片：輸入標籤，選擇一張或多張人臉照片，再按「加入已知人像（上傳）」。
+   - 即時拍攝：啟動攝影機後，輸入標籤並按「拍照加入已知人像」。
+4. 每次新增或更新人像後，前端會：
+   - 更新瀏覽器記憶中的 `faceMatcher`。
+   - 將特徵向量 (embedding) 送至 Supabase Edge Function 儲存。
+   - 重新同步遠端資料，確保本機狀態與資料庫一致。
+5. 進行辨識時，系統會在畫面上標記人臉與辨識結果：
+   - 顯示名稱與距離 (相似度)。
+   - 無法辨識時會顯示「未知」。
+
+---
+
+## 2. Supabase 設定流程
+
+### 2.1 建立資料表並啟用 pgvector
+
+在 Supabase SQL Editor 執行下列語法 (若模型 embedding 長度非 128，請調整 `vector(128)` 的值)：
+
+```sql
+create extension if not exists vector with schema public;
+
+create table if not exists public.faces (
+  id uuid default gen_random_uuid() primary key,
+  label text not null,
+  embedding vector(128) not null,
+  created_at timestamptz default timezone('utc', now())
+);
+
+create index if not exists faces_label_idx on public.faces (label);
+create index if not exists faces_embedding_idx on public.faces using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+```
+
+### 2.2 部署 Edge Functions
+
+專案已提供兩個範例函式：
+
+- `supabase/functions/faces-register/index.ts`：接收人臉向量並寫入資料表。
+- `supabase/functions/faces-list/index.ts`：回傳資料表內容供前端同步。
+
+在專案根目錄執行：
+
+```bash
+supabase functions deploy faces-register --no-verify-jwt
+supabase functions deploy faces-list --no-verify-jwt
+```
+
+> 若未來需要權限控管，可移除 `--no-verify-jwt` 並整合 Supabase Auth。
+
+### 2.3 設定 Secrets
+
+將以下參數替換為你的實際專案資訊後執行：
+
+```bash
+supabase secrets set \
+  SUPABASE_URL=https://<project-ref>.supabase.co \
+  SUPABASE_SERVICE_ROLE_KEY=<service-role-key> \
+  ALLOWED_ORIGINS="https://<username>.github.io,https://<username>.github.io/<repo>,http://localhost:8000"
+```
+
+- `SUPABASE_SERVICE_ROLE_KEY` 僅供 Edge Functions 使用，請勿在前端暴露。
+- `ALLOWED_ORIGINS` 設定允許呼叫函式的網域，可同時包含 GitHub Pages 與本機開發位址。
+
+### 2.4 前端設定
+
+在 `index.html` 的設定區塊更新 Functions 網域：
+
+```html
+<script>
+  window.__FACE_STORE_CONFIG__ = Object.assign(
+    {
+      functionsBaseUrl: "https://<project-ref>.functions.supabase.co",
+      listPath: "/faces-list",
+      registerPath: "/faces-register",
+    },
+    window.__FACE_STORE_CONFIG__
+  );
+</script>
+```
+
+---
+
+## 3. Python 範例 (camera_recognition.py)
+
+若想在本機使用 Python 進行偵測：
+
+1. 建議使用 Python 3.9 ~ 3.11，並建立虛擬環境。  
+   ```bash
    py -3.10 -m venv .venv
    .\.venv\Scripts\activate
-   ```
-2. 安裝套件：
-   ```
    pip install --upgrade pip
    pip install face-recognition opencv-python
    ```
-3. 準備已知人臉資料：
-   - 建立 `known_faces` 目錄。
-   - 在其中為每個人建立子目錄（避免路徑問題，建議使用英文，例如 `Alice`、`Bob`）。
-   - 在各子目錄放入一張或多張清晰正臉照片（JPG/PNG）。
+2. 建立資料夾 `known_faces/<名稱>`，並放入欲辨識對象的照片。
+3. 執行 `python camera_recognition.py`，程式會開啟攝影機並於畫面上顯示辨識結果。按 `q` 結束。
+4. 可調整程式頂端參數以改善辨識效果，例如：
+   - `VIDEO_SOURCE_INDEX`：選擇攝影機。
+   - `FACE_DISTANCE_THRESHOLD`：辨識距離門檻。
+   - `SAVE_UNKNOWN_FACES`：是否儲存未知人臉截圖。
 
-### 執行方式
-1. 確認虛擬環境已啟動且套件安裝完成。
-2. 在專案根目錄執行：
-   ```
-   python camera_recognition.py
-   ```
-3. 會開啟視窗顯示攝影機畫面：
-   - 已知人臉會顯示對應名稱。
-   - 未知人臉顯示 `Unknown`。
-   - 按 `q` 離開程式。
+---
 
-### 設定調整
-- 若開啟錯誤的攝影機，可在程式中修改 `VIDEO_SOURCE_INDEX`（常見為 0、1、2）。
-- 可透過 `FACE_DISTANCE_THRESHOLD` 調整辨識門檻（數值越低越嚴格）。
-- 想保存未知人臉供日後檢視，可將 `SAVE_UNKNOWN_FACES` 改為 `True`，並確認 `unknown_faces` 目錄存在。
+## 4. 常見注意事項
 
-### 常見問題
-- 安裝 `face-recognition` 失敗：請先更新 pip，確認 Python 版本支援，必要時安裝 Visual C++ Build Tools。
-- 辨識不準：提供更多高品質照片並保持光線均勻。
-- 效能不足：程式預設縮小影像提升速度，可調整 `FRAME_RESIZE_SCALE` 以取得更高畫質。
-
-方案二：GitHub Pages 網頁示範
------------------------------
-
-`docs/` 目錄提供純瀏覽器版本，使用 `face-api.js` 完成臉部偵測與辨識。影像不會上傳至伺服器。
-
-### 快速預覽（本機）
-1. 透過 HTTPS 或 `http://localhost` 服務 `docs/` 目錄（`getUserMedia` 需要安全來源）。例如使用 Python 3：
-   ```
-   py -m http.server 8000 --directory docs
-   ```
-2. 於瀏覽器（Chrome、Edge、Firefox）開啟 `http://localhost:8000`。
-3. 點擊 **載入模型**（模型將從公共 CDN 下載）。
-4. 對每位要辨識的人：
-   - 輸入標籤名稱。
-   - 選擇一張或多張清晰照片並按 **新增已知人臉（上傳）**，或啟動攝影機後按 **拍照新增已知人臉** 直接擷取影像。
-5. 點擊 **啟動攝影機** 並授權使用。畫面會顯示偵測框與最佳匹配結果。
-
-### 部署到 GitHub Pages
-1. 將此專案推送至 GitHub。
-2. 在 Repository 設定中開啟 GitHub Pages，設定：
-   - **Source**：`main`（或你的預設分支）
-   - **Folder**：`/docs`
-3. GitHub Pages 會自動將 `docs/index.html` 發佈在 `https://<使用者名稱>.github.io/<儲存庫>/`。
-4. 造訪網站，載入模型、加入標記照片，即可直接在瀏覽器辨識。
-   - 需要時也可在啟動攝影機後使用 **拍照新增已知人臉** 即時建立樣本。
-
-### 注意事項
-- 臉部特徵只儲存在記憶體中，重新整理頁面後會清除。若需永久保存，可擴充 `app.js` 將資料存到 IndexedDB 或預先讀取 JSON。
-- 示範使用 Tiny Face Detector 取得較佳效能，可在 `docs/app.js` 調整 `TINY_FACE_DETECTOR_OPTIONS` 及匹配門檻改變靈敏度。
-- 模型需從 CDN 載入，第一次使用可能需耗費數秒，視網路速度而定。
+- GitHub Pages 為純靜態託管，無法直接儲存資料，務必透過 Supabase Edge Functions 或其他後端服務。
+- 請妥善保護 Supabase Service Role Key，僅存放於 Edge Functions 或安全的伺服器環境。
+- 若資料量提升，可調整 pgvector 的索引參數或改用更專業的向量資料庫。
+- 在公開環境處理人臉資料時，記得遵循當地法規並取得使用者同意。

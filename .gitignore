@@ -1,0 +1,23 @@
+# Node / front-end artifacts
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python virtual environments and caches
+.venv/
+__pycache__/
+
+# Supabase local configuration
+.env
+.env.*
+supabase/.env
+supabase/.env.*
+.supabase
+
+# Editors / OS cruft
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+

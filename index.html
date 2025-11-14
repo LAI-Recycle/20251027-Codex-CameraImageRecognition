@@ -55,7 +55,6 @@
           <button id="clear-cache-btn" type="button">清除本機快取</button>
           <p class="cache-note">刪除後本機將不再保留任何人像資料</p>
         </div>
-
         <div class="camera-controls">
           <button id="start-camera-btn" class="primary">啟動攝影機</button>
           <button id="stop-camera-btn">停止攝影機</button>
@@ -75,6 +74,7 @@
             playsinline
           ></video>
           <canvas id="overlay" class="overlay" width="640" height="480"></canvas>
+          <div id="welcome-message" class="welcome-message" aria-live="polite" aria-hidden="true"></div>
         </div>
       </section>
     </main>

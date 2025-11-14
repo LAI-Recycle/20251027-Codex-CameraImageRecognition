@@ -15,6 +15,7 @@ const startCameraBtn = document.getElementById("start-camera-btn");
 const stopCameraBtn = document.getElementById("stop-camera-btn");
 const clearCacheBtn = document.getElementById("clear-cache-btn");
 const cameraStatus = document.getElementById("camera-status");
+const welcomeMessage = document.getElementById("welcome-message");
 const video = document.getElementById("video");
 const overlay = document.getElementById("overlay");
 const overlayCtx = overlay.getContext("2d");
@@ -27,6 +28,9 @@ const FUNCTION_PATHS = {
 };
 const SHOULD_USE_REMOTE_STORE = Boolean(FUNCTIONS_BASE_URL);
 const LOCAL_STORAGE_KEY = "face-recognition-known-faces";
+const RECOGNITION_DURATION_MS = 1000;
+const RECOGNITION_RESET_MS = 2000;
+const WELCOME_MESSAGE_DURATION_MS = 5000;
 
 let modelsLoaded = false;
 let labeledDescriptors = [];
@@ -36,6 +40,8 @@ let detectionIntervalId = null;
 let processingFrame = false;
 let mediaStream = null;
 let remoteSyncCompleted = false;
+const recognitionSessions = new Map();
+let welcomeMessageTimeout = null;
 
 function setStatus(element, message, type = null) {
   element.textContent = message;
@@ -194,6 +200,64 @@ function rebuildMatcher() {
 }
 
 restoreKnownFacesFromLocal();
+
+function showWelcomeMessage(label) {
+  if (!welcomeMessage) {
+    return;
+  }
+  welcomeMessage.textContent = `歡迎回來，${label}！`;
+  welcomeMessage.classList.add("visible");
+  welcomeMessage.setAttribute("aria-hidden", "false");
+  if (welcomeMessageTimeout) {
+    clearTimeout(welcomeMessageTimeout);
+  }
+  welcomeMessageTimeout = setTimeout(hideWelcomeMessage, WELCOME_MESSAGE_DURATION_MS);
+}
+
+function hideWelcomeMessage() {
+  if (!welcomeMessage) {
+    return;
+  }
+  welcomeMessage.classList.remove("visible");
+  welcomeMessage.setAttribute("aria-hidden", "true");
+  if (welcomeMessageTimeout) {
+    clearTimeout(welcomeMessageTimeout);
+    welcomeMessageTimeout = null;
+  }
+}
+
+function updateRecognitionSession(label) {
+  if (!label) {
+    return;
+  }
+  const now = Date.now();
+  const session =
+    recognitionSessions.get(label) || { start: now, lastSeen: now, triggered: false };
+  if (now - session.lastSeen > RECOGNITION_RESET_MS) {
+    session.start = now;
+    session.triggered = false;
+  }
+  session.lastSeen = now;
+  if (!session.triggered && now - session.start >= RECOGNITION_DURATION_MS) {
+    session.triggered = true;
+    showWelcomeMessage(label);
+  }
+  recognitionSessions.set(label, session);
+}
+
+function cleanupRecognitionSessions() {
+  const now = Date.now();
+  recognitionSessions.forEach((session, label) => {
+    if (now - session.lastSeen > RECOGNITION_RESET_MS) {
+      recognitionSessions.delete(label);
+    }
+  });
+}
+
+function resetRecognitionTracking() {
+  recognitionSessions.clear();
+  hideWelcomeMessage();
+}
 
 async function syncKnownFacesFromRemote(force = false, options = {}) {
   if (!SHOULD_USE_REMOTE_STORE) {
@@ -499,6 +563,14 @@ async function startCamera() {
     return;
   }
 
+  if (
+    !navigator.mediaDevices ||
+    typeof navigator.mediaDevices.getUserMedia !== "function"
+  ) {
+    setStatus(cameraStatus, "此瀏覽器不支援攝影機", "warn");
+    return;
+  }
+
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
     video.srcObject = mediaStream;
@@ -508,7 +580,7 @@ async function startCamera() {
     runDetectionLoop();
   } catch (error) {
     console.error(error);
-    setStatus(cameraStatus, "無法存取攝影機", "warn");
+    setStatus(cameraStatus, "無法啟動攝影機，請確認權限或裝置狀態", "warn");
   }
 }
 
@@ -528,6 +600,7 @@ function stopCamera() {
     video.srcObject = null;
   }
   setStatus(cameraStatus, "攝影機已停止");
+  resetRecognitionTracking();
 }
 
 function runDetectionLoop() {
@@ -565,37 +638,46 @@ async function processFrame() {
 
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
 
-    if (detections.length === 0) {
-      return;
+    if (detections.length > 0) {
+      const resizedDetections = faceapi.resizeResults(detections, {
+        width: overlay.width,
+        height: overlay.height,
+      });
+
+      resizedDetections.forEach((detection) => {
+        const box = detection.detection.box;
+        overlayCtx.strokeStyle = "#00b894";
+        overlayCtx.lineWidth = 3;
+        overlayCtx.strokeRect(box.x, box.y, box.width, box.height);
+
+        let displayLabel = "未知";
+        let resolvedLabel = null;
+        if (faceMatcher) {
+          const match = faceMatcher.findBestMatch(detection.descriptor);
+          if (match.label === "unknown") {
+            displayLabel = "未知";
+          } else {
+            resolvedLabel = match.label;
+            displayLabel = `${match.label}（${match.distance.toFixed(2)}）`;
+          }
+        }
+
+        const labelHeight = 26;
+        overlayCtx.fillStyle = "rgba(0, 0, 0, 0.65)";
+        const labelY = Math.max(box.y - labelHeight, 0);
+        overlayCtx.fillRect(box.x, labelY, box.width, labelHeight);
+
+        overlayCtx.fillStyle = "#ffffff";
+        overlayCtx.font = "16px Segoe UI, sans-serif";
+        overlayCtx.fillText(displayLabel, box.x + 6, labelY + 18);
+
+        if (resolvedLabel) {
+          updateRecognitionSession(resolvedLabel);
+        }
+      });
     }
 
-    const resizedDetections = faceapi.resizeResults(detections, {
-      width: overlay.width,
-      height: overlay.height,
-    });
-
-    resizedDetections.forEach((detection) => {
-      const box = detection.detection.box;
-      overlayCtx.strokeStyle = "#00b894";
-      overlayCtx.lineWidth = 3;
-      overlayCtx.strokeRect(box.x, box.y, box.width, box.height);
-
-      let displayLabel = "未知";
-      if (faceMatcher) {
-        const match = faceMatcher.findBestMatch(detection.descriptor);
-        displayLabel =
-          match.label === "unknown" ? "未知" : `${match.label}（${match.distance.toFixed(2)}）`;
-      }
-
-      const labelHeight = 26;
-      overlayCtx.fillStyle = "rgba(0, 0, 0, 0.65)";
-      const labelY = Math.max(box.y - labelHeight, 0);
-      overlayCtx.fillRect(box.x, labelY, box.width, labelHeight);
-
-      overlayCtx.fillStyle = "#ffffff";
-      overlayCtx.font = "16px Segoe UI, sans-serif";
-      overlayCtx.fillText(displayLabel, box.x + 6, labelY + 18);
-    });
+    cleanupRecognitionSessions();
   } catch (error) {
     console.error("偵測畫面時發生錯誤", error);
   } finally {
@@ -623,8 +705,9 @@ if (clearCacheBtn) {
 window.addEventListener("DOMContentLoaded", () => {
   if (SHOULD_USE_REMOTE_STORE) {
     syncKnownFacesFromRemote(false, { silent: true }).catch((error) =>
-      console.warn("預載遠端資料失敗", error)
+      console.warn("同步遠端資料失敗", error)
     );
   }
 });
+
 window.addEventListener("beforeunload", stopCamera);
